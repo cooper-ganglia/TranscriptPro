@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>ProTranscript</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Local Tailwind CSS (to be installed below) -->
+    <script src="./dist/tailwind.js"></script>
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+      }
+      .progress-bar {
+        width: 0;
+        height: 8px;
+        background-color: #4ade80;
+        border-radius: 4px;
+        transition: width 0.3s ease-in-out;
+      }
+      #queue {
+        max-height: 300px;
+        overflow-y: auto;
+        margin-top: 1rem;
+      }
+      .queue-item {
+        padding: 0.5rem;
+        border-bottom: 1px solid #4a5568;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .queue-item.processing .progress {
+        width: 0;
+        height: 4px;
+        background-color: #4ade80;
+        border-radius: 2px;
+        transition: width 0.3s ease-in-out;
+      }
+    </style>
+    <!-- Content Security Policy for security -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+  </head>
+  <body class="bg-gradient-to-br from-[#1e3a8a] to-gray-900 flex items-center justify-center">
+    <div class="text-center w-full max-w-4xl px-8">
+      <img src="assets/logo.png" alt="ProTranscript Logo" class="mb-4 mx-auto h-16" />
+      <h1 class="text-4xl font-bold text-white mb-6 drop-shadow-lg">ProTranscript</h1>
+      <p class="text-xl text-white/80 mb-8">Drag and drop your video files to transcribe</p>
+      <div
+        id="drop-zone"
+        class="p-8 rounded-xl bg-white/10 backdrop-blur-lg text-white text-xl font-semibold transition-all shadow-xl hover:bg-white/20 border-2 border-dashed border-white/30 w-full min-h-[200px] flex flex-col items-center justify-center cursor-pointer"
+      >
+        <p id="drop-text">Drag and drop video files here or click to select</p>
+        <div id="processing" class="hidden flex flex-col items-center">
+          <div class="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-white mb-2"></div>
+          <p class="text-white">Processing <span id="current-file"></span>...</p>
+          <div class="w-full mt-4 bg-white/20 rounded-full h-2">
+            <div class="progress-bar" id="progress-bar"></div>
+          </div>
+        </div>
+        <p id="error-message" class="text-red-400 hidden mt-2"></p>
+      </div>
+      <input type="file" id="file-input" class="hidden" accept="video/*" multiple />
+      <div class="mt-6 flex flex-col items-center space-y-4">
+        <button id="upload-btn" class="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">Upload Videos</button>
+        <button id="clear-btn" class="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600">Clear Queue</button>
+        <button id="download-results-btn" class="px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 hidden">Download All Results</button>
+      </div>
+      <div id="queue" class="mt-6 w-full max-w-4xl bg-white/10 rounded-lg text-white p-4">
+        <h2 class="text-xl font-semibold mb-2">Processing Queue</h2>
+        <ul id="queue-list" class="list-disc list-inside"></ul>
+      </div>
+      <div id="results" class="mt-6 w-full max-w-4xl p-6 bg-white/10 rounded-lg text-white hidden">
+        <h2 class="text-xl font-semibold mb-2">Transcription Results</h2>
+        <pre id="transcription-text" class="text-lg whitespace-pre-wrap mb-4"></pre>
+        <button id="download-btn" class="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 hidden">Download .txt</button>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script>
+      // Ensure axios is loaded before using it
+      if (typeof axios === 'undefined') {
+        console.error('axios is not loaded. Using CDN might not work; check local setup.');
+      } else {
+        console.log('axios loaded successfully');
+      }
+
+      const dropZone = document.getElementById('drop-zone');
+      const fileInput = document.getElementById('file-input');
+      const dropText = document.getElementById('drop-text');
+      const processing = document.getElementById('processing');
+      const progressBar = document.getElementById('progress-bar');
+      const errorMessage = document.getElementById('error-message');
+      const results = document.getElementById('results');
+      const transcriptionText = document.getElementById('transcription-text');
+      const queueList = document.getElementById('queue-list');
+      const currentFileSpan = document.getElementById('current-file');
+      const downloadBtn = document.getElementById('download-btn');
+      const uploadBtn = document.getElementById('upload-btn');
+      const clearBtn = document.getElementById('clear-btn');
+      const downloadResultsBtn = document.getElementById('download-results-btn');
+
+      let fileQueue = [];
+      let processingFile = false;
+      let transcriptions = []; // Store transcriptions for bulk download
+      let fileProgress = {}; // Store progress for each file
+
+      async function checkServer(url = 'http://127.0.0.1:8000') {
+        try {
+          const dummyWav = new Uint8Array([82, 73, 70, 70, 36, 0, 0, 0, 87, 65, 86, 69, 102, 109, 116, 16, 0, 0, 0, 1, 0, 1, 0, 68, 172, 0, 0, 16, 177, 2, 0, 2, 0, 16, 0, 100, 97, 116, 97, 4, 0, 0, 0, 0, 0, 0, 0]); // Simple valid WAV header
+          const formData = new FormData();
+          formData.append('file', new Blob([dummyWav], { type: 'audio/wav' }));
+          const response = await axios.post(url + '/transcribe', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+          });
+          console.log(`Server check successful for ${url}:`, response.status, response.data);
+          return true;
+        } catch (err) {
+          if (err.response && err.response.status === 500) {
+            console.warn(`Server check received 500 for ${url}:`, err.response.data);
+            return true; // Treat 500 as reachable for now, but log it
+          }
+          console.error(`Server check failed for ${url}:`, {
+            message: err.message,
+            code: err.code,
+            config: err.config?.url,
+            response: err.response ? {
+              status: err.response.status,
+              data: err.response.data,
+              headers: err.response.headers
+            } : null
+          });
+          return false;
+        }
+      }
+
+      async function testFetch(url) {
+        try {
+          const response = await fetch(url, { method: 'HEAD' });
+          console.log(`Fetch test successful for ${url}:`, response.status);
+          return true;
+        } catch (err) {
+          console.error(`Fetch test failed for ${url}:`, err.message);
+          return false;
+        }
+      }
+
+      async function processQueue() {
+        if (processingFile || fileQueue.length === 0) return;
+
+        processingFile = true;
+        const filePath = fileQueue.shift(); // Remove and get the first file (top of queue)
+        updateQueueDisplay(filePath, 'processing');
+        currentFileSpan.textContent = filePath.split('/').pop() || 'file';
+
+        startProcessing();
+        const startTime = Date.now();
+        try {
+          const formData = new FormData();
+          formData.append('file', new File([await fetch(filePath).then(res => res.blob())], filePath.split('/').pop(), { type: 'video/*' }));
+
+          const serverUrls = ['http://127.0.0.1:8000', 'http://localhost:8000'];
+          let serverUrl = serverUrls.find(url => checkServer(url)) || 'http://127.0.0.1:8000';
+
+          const response = await axios.post(serverUrl + '/transcribe', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            onUploadProgress: (progressEvent) => {
+              const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+              updateProgress(filePath, percentCompleted);
+            },
+          });
+          console.log('Transcription complete for:', filePath, 'Time:', (Date.now() - startTime) / 1000, 'seconds');
+          endProcessing();
+          const transcription = response.data.text;
+          transcriptionText.textContent = transcription;
+          results.classList.remove('hidden');
+          downloadBtn.classList.remove('hidden');
+          saveTranscription(transcription, filePath.split('/').pop().replace(/\.[^.]+$/, '') + '.txt');
+          transcriptions.push({ filename: filePath.split('/').pop().replace(/\.[^.]+$/, '') + '.txt', content: transcription });
+          updateQueueDisplay(filePath, 'completed');
+          downloadResultsBtn.classList.remove('hidden');
+        } catch (err) {
+          console.error('Error processing:', filePath, err);
+          showError(`Error processing ${filePath.split('/').pop() || 'file'}: ${err.message || 'Unknown error'}`);
+          updateQueueDisplay(filePath, 'error');
+        } finally {
+          processingFile = false;
+          processQueue(); // Process the next file in the queue (from the bottom)
+        }
+      }
+
+      function startProcessing() {
+        dropText.classList.add('hidden');
+        processing.classList.remove('hidden');
+        errorMessage.classList.add('hidden');
+        progressBar.style.width = '0%';
+        let progress = 0;
+        const interval = setInterval(() => {
+          progress = Math.min(progress + 1, 100); // Smooth progress for long tasks
+          progressBar.style.width = `${progress}%`;
+        }, 1000); // Update every second
+      }
+
+      function endProcessing() {
+        // No timeout, processing can take as long as needed
+        dropText.classList.remove('hidden');
+        processing.classList.add('hidden');
+        progressBar.style.width = '100%';
+        setTimeout(() => progressBar.style.width = '0%', 500);
+      }
+
+      function showError(message) {
+        endProcessing();
+        errorMessage.textContent = message;
+        errorMessage.classList.remove('hidden');
+      }
+
+      function updateQueueDisplay(filePath, status = 'queued') {
+        queueList.innerHTML = '';
+        fileQueue.forEach((file, index) => {
+          const li = document.createElement('li');
+          li.className = `queue-item ${filePath === file ? status : 'queued'}`;
+          const fileName = file.split('/').pop() || 'Unknown file';
+          li.innerHTML = `
+            <span>${index + 1}. ${fileName}</span>
+            <span class="text-sm text-pro-gray">
+              ${status === 'processing' ? `<div class="progress" style="width: ${fileProgress[file] || 0}%"></div>` : status.charAt(0).toUpperCase() + status.slice(1)}
+            </span>
+          `;
+          queueList.appendChild(li);
+        });
+        if (fileQueue.length === 0) {
+          queueList.innerHTML = '<li class="text-pro-gray">No files in queue</li>';
+        }
+      }
+
+      function updateProgress(filePath, percent) {
+        fileProgress[filePath] = Math.min(percent, 100);
+        updateQueueDisplay(filePath, 'processing');
+      }
+
+      function saveTranscription(text, filename) {
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = window.URL.createObjectURL(blob);
+        downloadBtn.onclick = () => {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        };
+        downloadBtn.classList.remove('hidden');
+      }
+
+      function downloadAllResults() {
+        const zip = new JSZip();
+        transcriptions.forEach(({ filename, content }) => {
+          zip.file(filename, content);
+        });
+        zip.generateAsync({ type: 'blob' }).then((content) => {
+          const url = window.URL.createObjectURL(content);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'transcriptions.zip';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        });
+      }
+
+      // Load JSZip for bulk download
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+      script.onload = () => console.log('JSZip loaded successfully');
+      script.onerror = () => console.error('Failed to load JSZip');
+      document.head.appendChild(script);
+
+      dropZone.addEventListener('click', () => {
+        fileInput.click();
+      });
+
+      fileInput.addEventListener('change', (e) => {
+        const files = Array.from(e.target.files);
+        files.forEach(file => fileQueue.push(file.path)); // Add to bottom of queue
+        updateQueueDisplay();
+        processQueue();
+        fileInput.value = ''; // Reset input to allow re-uploading the same file
+      });
+
+      dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('bg-white/20', 'scale-105');
+      });
+
+      dropZone.addEventListener('dragleave', () => {
+        dropZone.classList.remove('bg-white/20', 'scale-105');
+      });
+
+      dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('bg-white/20', 'scale-105');
+        const files = Array.from(e.dataTransfer.files);
+        files.forEach(file => fileQueue.push(file.path)); // Add to bottom of queue
+        updateQueueDisplay();
+        processQueue();
+      });
+
+      uploadBtn.addEventListener('click', () => fileInput.click());
+
+      clearBtn.addEventListener('click', () => {
+        fileQueue = [];
+        processingFile = false;
+        fileProgress = {};
+        transcriptions = [];
+        updateQueueDisplay();
+        results.classList.add('hidden');
+        transcriptionText.textContent = '';
+        errorMessage.classList.add('hidden');
+        errorMessage.textContent = '';
+        downloadBtn.classList.add('hidden');
+        downloadResultsBtn.classList.add('hidden');
+      });
+
+      downloadResultsBtn.addEventListener('click', downloadAllResults);
+    </script>
+  </body>
+</html>
